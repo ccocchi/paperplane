@@ -12,17 +12,19 @@ module Paperplane
       @@lock = Mutex.new
 
       @@access_token = nil
-      @@token_refreshed_at = nil
+      @@access_token_valid_until = nil
 
       class << self
         def refresh_access_token
-          @@lock.synchronize do
-            unless @@token_refreshed_at && @@token_refreshed_at >= 1.hour.ago
-              @@access_token = get_access_token
-              @@token_refreshed_at = Time.now
+          @lock.synchronize do
+            unless valid_token?
+              get_access_token
             end
           end
-          @@access_token
+        end
+
+        def valid_token?
+          @access_token && @access_token_valid_until > Time.now
         end
 
         def build_https_request(uri)
@@ -47,7 +49,9 @@ module Paperplane
 
           response = http.request(request)
           if response.code == '200'
-            Oj.load(response.body)['access_token']
+            body = Oj.load(response.body)
+            @access_token = body['access_token']
+            @access_token_valid_until = Time.now + (body.fetch('expires_in', 86400).to_i - 60)
           else
             nil
           end
@@ -56,27 +60,19 @@ module Paperplane
 
       CONTENT_TYPE_XML = 'text/xml'
 
-      def initialize(access_token = nil)
-        self.class.refresh_access_token unless @@access_token
-        @access_token = access_token || @@access_token
-      end
-
       def push(notification)
+        self.class.refresh_access_token unless self.class.valid_token?
+
         uri = URI.parse(notification.channel_uri)
         http, request = self.class.build_https_request(uri)
 
-        request['Authorization'] = "Bearer #{@access_token}"
+        request['Authorization'] = "Bearer #{@@access_token}"
         request['Content-Type']  = CONTENT_TYPE_XML
         request['X-WNS-Type']    = notification.wns_type_header
 
         request.body = notification.to_xml
 
         response = http.request(request)
-        if response.code == '401'
-          @access_token = self.class.refresh_access_token
-          request['Authorization'] = "Bearer #{@access_token}"
-          response = http.request(request)
-        end
         response.code == '200'
       end
     end
